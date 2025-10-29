@@ -1,0 +1,5 @@
+{
+  "name": "Personal Finance Tracker",
+  "description": "An application to register, classify, and track personal finances, including expenses, income, debts, and recurring payments.",
+  "requestFramePermissions": []
+}
