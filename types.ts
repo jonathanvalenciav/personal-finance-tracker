@@ -63,6 +63,7 @@ export interface FixedExpense {
   amount: number;
   category: string;
   paymentDay: number; // 1-31
+  lastPaidMonth?: string; // Format: 'YYYY-MM'
 }
 
 export type ActiveTab = 'dashboard' | 'debts' | 'fixedExpenses' | 'categories' | 'settings';

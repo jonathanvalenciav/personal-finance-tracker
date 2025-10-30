@@ -69,10 +69,9 @@ const App: React.FC = () => {
         const existingDebt = updatedDebts[existingDebtIndex];
         existingDebt.totalAmount += amount;
         
-        // Use person field to store card ID for future reference
         existingDebt.person = creditCard.id;
 
-        if(existingDebt.totalAmount <= 0.01) { // Use a small threshold for floating point issues
+        if(existingDebt.totalAmount <= 0.01) { 
             return updatedDebts.filter(d => d.billingCycleIdentifier !== billingCycleId);
         }
         return updatedDebts;
@@ -84,7 +83,7 @@ const App: React.FC = () => {
           paidAmount: 0,
           dueDate: paymentDueDate.toISOString(),
           type: DebtType.I_OWE,
-          person: creditCard.id, // Store card ID here
+          person: creditCard.id,
           billingCycleIdentifier: billingCycleId,
         };
         return [...prevDebts, newDebt];
@@ -127,9 +126,24 @@ const App: React.FC = () => {
     }
   };
 
-  const addDebt = (debt: Omit<Debt, 'id' | 'paidAmount'>) => {
-    setDebts(prev => [...prev, { ...debt, id: crypto.randomUUID(), paidAmount: 0 }]);
+  const saveDebt = (debtData: Omit<Debt, 'id' | 'paidAmount' | 'billingCycleIdentifier'>, idToUpdate?: string) => {
+    if (idToUpdate) {
+        setDebts(prev => prev.map(d => 
+            d.id === idToUpdate ? { ...d, ...debtData, id: idToUpdate } : d
+        ));
+    } else {
+        const newDebt: Debt = {
+            ...debtData,
+            id: crypto.randomUUID(),
+            paidAmount: 0,
+        };
+        setDebts(prev => [...prev, newDebt]);
+    }
   };
+  
+  const deleteDebt = (debtId: string) => {
+      setDebts(prev => prev.filter(d => d.id !== debtId));
+  }
 
   const payDebt = (debtId: string, amount: number) => {
     let debtToPay: Debt | undefined;
@@ -155,9 +169,35 @@ const App: React.FC = () => {
     }
   };
   
-  const addFixedExpense = (expense: Omit<FixedExpense, 'id'>) => {
-    setFixedExpenses(prev => [...prev, { ...expense, id: crypto.randomUUID() }]);
+  const saveFixedExpense = (expenseData: Omit<FixedExpense, 'id' | 'lastPaidMonth'>, idToUpdate?: string) => {
+    if (idToUpdate) {
+        setFixedExpenses(prev => prev.map(e => e.id === idToUpdate ? { ...e, ...expenseData, id: idToUpdate } : e));
+    } else {
+        setFixedExpenses(prev => [...prev, { ...expenseData, id: crypto.randomUUID() }]);
+    }
   };
+
+  const deleteFixedExpense = (id: string) => {
+      setFixedExpenses(prev => prev.filter(e => e.id !== id));
+  }
+
+  const payFixedExpense = (id: string, amountToPay: number) => {
+      const expense = fixedExpenses.find(e => e.id === id);
+      if (!expense) return;
+
+      saveTransaction({
+          amount: amountToPay,
+          description: `Pago Gasto Fijo: ${expense.description}`,
+          date: new Date().toISOString(),
+          type: TransactionType.EXPENSE,
+          category: expense.category,
+          location: '',
+          paymentMethod: PaymentMethod.BANK,
+      });
+
+      const currentMonthStr = new Date().toISOString().slice(0, 7); // YYYY-MM
+      setFixedExpenses(prev => prev.map(e => e.id === id ? { ...e, lastPaidMonth: currentMonthStr } : e));
+  }
 
   const saveCreditCard = (card: Omit<CreditCard, 'id'>, idToUpdate?: string) => {
     if (idToUpdate) {
@@ -222,9 +262,9 @@ const App: React.FC = () => {
   const renderContent = () => {
     switch (activeTab) {
       case 'debts':
-        return <DebtManager debts={debts} onAddDebt={addDebt} onPayDebt={payDebt} />;
+        return <DebtManager debts={debts} onSaveDebt={saveDebt} onPayDebt={payDebt} onDeleteDebt={deleteDebt} />;
       case 'fixedExpenses':
-        return <FixedExpenses expenses={fixedExpenses} categories={categories} onAddExpense={addFixedExpense}/>;
+        return <FixedExpenses expenses={fixedExpenses} categories={categories} onSaveExpense={saveFixedExpense} onPayExpense={payFixedExpense} onDeleteExpense={deleteFixedExpense} />;
       case 'categories':
         return <CategoryManager categories={categories} onAddCategory={addCategory} />;
       case 'settings':
