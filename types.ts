@@ -44,6 +44,10 @@ export interface Transaction {
   location: string;
   paymentMethod: PaymentMethod;
   creditCardId?: string;
+  status?: 'active' | 'voided';
+  paidDebtId?: string;
+  isLoan?: boolean;
+  advanceFee?: number;
 }
 
 export interface Debt {
@@ -55,6 +59,8 @@ export interface Debt {
   type: DebtType;
   person: string;
   billingCycleIdentifier?: string; // To group credit card debts
+  sourceCreditCardId?: string; // To link a loan to a CC
+  originatingTransactionId?: string; // To link a debt to the transaction that created it
 }
 
 export interface FixedExpense {

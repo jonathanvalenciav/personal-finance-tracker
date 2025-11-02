@@ -37,6 +37,10 @@ const App: React.FC = () => {
     return Array.from(uniqueLocations);
   }, [transactions]);
 
+  const debtsOwedToMe = useMemo(() => {
+    return debts.filter(d => d.type === DebtType.THEY_OWE_ME && d.totalAmount > d.paidAmount);
+  }, [debts]);
+
   const handleUpdateCreditCardDebt = (transaction: Transaction, operation: 'add' | 'subtract') => {
     if (transaction.type !== TransactionType.EXPENSE || transaction.paymentMethod !== PaymentMethod.CREDIT_CARD || !transaction.creditCardId) {
       return;
@@ -92,20 +96,168 @@ const App: React.FC = () => {
     });
   };
 
-  const saveTransaction = (transactionData: Omit<Transaction, 'id'>, idToUpdate?: string) => {
-    if (idToUpdate) {
+  const saveTransaction = (
+    transactionData: Omit<Transaction, 'id'>, 
+    idToUpdate?: string, 
+    paidDebtId?: string,
+    loanDetails?: { isLoan: boolean; person: string; dueDate: string; }
+  ) => {
+    const isEditing = !!idToUpdate;
+    const isCashAdvance = transactionData.isLoan && transactionData.type === TransactionType.INCOME && transactionData.paymentMethod === PaymentMethod.CREDIT_CARD;
+
+    if (isEditing) {
       const originalTransaction = transactions.find(t => t.id === idToUpdate);
       if (originalTransaction) {
-        handleUpdateCreditCardDebt(originalTransaction, 'subtract');
+        const wasCashAdvance = originalTransaction.isLoan && originalTransaction.type === TransactionType.INCOME && originalTransaction.paymentMethod === PaymentMethod.CREDIT_CARD;
+        
+        if (wasCashAdvance) {
+          const debtAmount = originalTransaction.amount + (originalTransaction.advanceFee || 0);
+          const fakeExpenseForDebt: Transaction = { ...originalTransaction, type: TransactionType.EXPENSE, amount: debtAmount };
+          handleUpdateCreditCardDebt(fakeExpenseForDebt, 'subtract');
+        } else {
+          handleUpdateCreditCardDebt(originalTransaction, 'subtract');
+        }
       }
-      const updatedTransaction = { ...transactionData, id: idToUpdate };
-      handleUpdateCreditCardDebt(updatedTransaction, 'add');
-      setTransactions(prev => prev.map(t => t.id === idToUpdate ? updatedTransaction : t));
-    } else {
-      const newTransaction = { ...transactionData, id: crypto.randomUUID() };
-      handleUpdateCreditCardDebt(newTransaction, 'add');
-      setTransactions(prev => [...prev, newTransaction]);
     }
+
+    const transactionId = isEditing ? idToUpdate as string : crypto.randomUUID();
+    const newTransaction: Transaction = {
+        ...transactionData,
+        id: transactionId,
+        status: 'active',
+        paidDebtId: paidDebtId,
+    };
+
+    const debtLinkedToTransaction = debts.find(d => d.originatingTransactionId === transactionId);
+
+    // Create a regular loan debt, but NOT for cash advances (as their debt is handled by the CC billing cycle).
+    if (loanDetails?.isLoan && !isCashAdvance) {
+      const debtData: Omit<Debt, 'id' | 'paidAmount' | 'billingCycleIdentifier'> = {
+        description: transactionData.description,
+        totalAmount: transactionData.amount,
+        dueDate: new Date(loanDetails.dueDate).toISOString(),
+        type: transactionData.type === TransactionType.EXPENSE ? DebtType.THEY_OWE_ME : DebtType.I_OWE,
+        person: loanDetails.person,
+        sourceCreditCardId: (transactionData.type === TransactionType.EXPENSE && transactionData.paymentMethod === PaymentMethod.CREDIT_CARD) ? transactionData.creditCardId : undefined,
+        originatingTransactionId: transactionId,
+      };
+
+      if (debtLinkedToTransaction) {
+        setDebts(prev => prev.map(d => d.id === debtLinkedToTransaction.id ? { ...d, ...debtData, id: d.id, paidAmount: d.paidAmount } : d));
+      } else {
+        saveDebt(debtData);
+      }
+    } else if (isEditing && debtLinkedToTransaction && !newTransaction.isLoan) {
+      // If a transaction is edited to no longer be a loan, delete the associated debt
+      deleteDebt(debtLinkedToTransaction.id);
+    }
+    
+    if (paidDebtId && !isEditing) {
+        const debtBeingPaid = debts.find(d => d.id === paidDebtId);
+        if (debtBeingPaid) {
+          setDebts(prevDebts => 
+              prevDebts.map(debt => {
+                  if (debt.id === paidDebtId) {
+                      const newPaidAmount = debt.paidAmount + transactionData.amount;
+                      return { ...debt, paidAmount: Math.min(newPaidAmount, debt.totalAmount) };
+                  }
+                  return debt;
+              })
+          );
+        }
+        
+        if (debtBeingPaid && debtBeingPaid.sourceCreditCardId && transactionData.type === TransactionType.INCOME) {
+            const sourceCardId = debtBeingPaid.sourceCreditCardId;
+            setDebts(prevDebts => {
+                const cardDebts = prevDebts
+                    .filter(d => d.person === sourceCardId && d.billingCycleIdentifier && (d.totalAmount - d.paidAmount > 0.01))
+                    .sort((a, b) => new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime());
+
+                if (cardDebts.length > 0) {
+                    const debtToPayId = cardDebts[0].id;
+                    return prevDebts.map(d => {
+                        if (d.id === debtToPayId) {
+                            const newPaidAmount = d.paidAmount + transactionData.amount;
+                            return { ...d, paidAmount: Math.min(newPaidAmount, d.totalAmount) };
+                        }
+                        return d;
+                    });
+                }
+                return prevDebts;
+            });
+        }
+    }
+    
+    setTransactions(prev => isEditing ? prev.map(t => t.id === idToUpdate ? newTransaction : t) : [...prev, newTransaction]);
+    
+    if (isCashAdvance) {
+        const debtAmount = newTransaction.amount + (newTransaction.advanceFee || 0);
+        const fakeExpenseForDebt: Transaction = { ...newTransaction, type: TransactionType.EXPENSE, amount: debtAmount };
+        handleUpdateCreditCardDebt(fakeExpenseForDebt, 'add');
+    } else {
+        handleUpdateCreditCardDebt(newTransaction, 'add');
+    }
+
+    handleCloseTransactionModal();
+  };
+
+  const voidTransaction = (transactionId: string) => {
+    const transactionToVoid = transactions.find(t => t.id === transactionId);
+    if (!transactionToVoid || transactionToVoid.status === 'voided') return;
+
+    const isCashAdvance = transactionToVoid.isLoan && transactionToVoid.type === TransactionType.INCOME && transactionToVoid.paymentMethod === PaymentMethod.CREDIT_CARD;
+
+    if (isCashAdvance) {
+        const debtAmount = transactionToVoid.amount + (transactionToVoid.advanceFee || 0);
+        const fakeExpenseForDebt: Transaction = { ...transactionToVoid, type: TransactionType.EXPENSE, amount: debtAmount };
+        handleUpdateCreditCardDebt(fakeExpenseForDebt, 'subtract');
+    } else {
+        handleUpdateCreditCardDebt(transactionToVoid, 'subtract');
+    }
+
+    if (transactionToVoid.paidDebtId) {
+      const debtThatWasPaid = debts.find(d => d.id === transactionToVoid.paidDebtId);
+      
+      setDebts(prev => prev.map(d => {
+        if (d.id === transactionToVoid.paidDebtId) {
+          return { ...d, paidAmount: d.paidAmount - transactionToVoid.amount };
+        }
+        return d;
+      }));
+
+      if (debtThatWasPaid && debtThatWasPaid.sourceCreditCardId && transactionToVoid.type === TransactionType.INCOME) {
+        const sourceCardId = debtThatWasPaid.sourceCreditCardId;
+        setDebts(prevDebts => {
+            let amountToReverse = transactionToVoid.amount;
+            const updatedDebts = [...prevDebts];
+            const cardDebtsToAdjust = updatedDebts
+                .filter(d => d.person === sourceCardId && d.billingCycleIdentifier && d.paidAmount > 0)
+                .sort((a, b) => new Date(b.dueDate).getTime() - new Date(a.dueDate).getTime());
+
+            for (const debt of cardDebtsToAdjust) {
+                if (amountToReverse <= 0) break;
+                const reversalAmount = Math.min(amountToReverse, debt.paidAmount);
+                const debtIndex = updatedDebts.findIndex(d => d.id === debt.id);
+                if (debtIndex > -1) {
+                    updatedDebts[debtIndex].paidAmount -= reversalAmount;
+                    amountToReverse -= reversalAmount;
+                }
+            }
+            return updatedDebts;
+        });
+      }
+    }
+
+    const debtCreatedByThisTx = debts.find(d => d.originatingTransactionId === transactionId);
+    if (debtCreatedByThisTx) {
+      setDebts(prev => prev.filter(d => d.id !== debtCreatedByThisTx.id));
+    }
+
+    setTransactions(prev => prev.map(t =>
+      t.id === transactionId ? { ...t, status: 'voided' } : t
+    ));
+    
+    handleCloseTransactionModal();
   };
 
   const handleStartEditTransaction = (transaction: Transaction) => {
@@ -118,18 +270,43 @@ const App: React.FC = () => {
     setTransactionModalOpen(false);
   };
 
-  const addCategory = (name: string) => {
-    if (!categories.some(cat => cat.name.toLowerCase() === name.toLowerCase())) {
-        setCategories(prev => [...prev, { id: crypto.randomUUID(), name, icon: 'fa-question-circle', color: 'bg-gray-500' }]);
+  const saveCategory = (categoryData: Omit<Category, 'id'>, idToUpdate?: string) => {
+    if (idToUpdate) {
+        setCategories(prev => prev.map(c => 
+            c.id === idToUpdate ? { ...c, ...categoryData, id: idToUpdate } : c
+        ));
     } else {
-        alert("La categoría ya existe.");
+        if (!categories.some(cat => cat.name.toLowerCase() === categoryData.name.toLowerCase())) {
+            setCategories(prev => [...prev, { ...categoryData, id: crypto.randomUUID() }]);
+        } else {
+            alert("La categoría ya existe.");
+        }
     }
+  };
+
+  const deleteCategory = (categoryId: string) => {
+    const categoryToDelete = categories.find(c => c.id === categoryId);
+    const defaultCategory = categories.find(c => c.name === 'Otro');
+    if (!defaultCategory || !categoryToDelete) {
+        alert("No se puede completar la operación de eliminación.");
+        return;
+    }
+
+    setTransactions(prev => prev.map(t => 
+        t.category === categoryToDelete.name ? { ...t, category: defaultCategory.name } : t
+    ));
+
+    setFixedExpenses(prev => prev.map(e =>
+        e.category === categoryToDelete.name ? { ...e, category: defaultCategory.name } : e
+    ));
+
+    setCategories(prev => prev.filter(c => c.id !== categoryId));
   };
 
   const saveDebt = (debtData: Omit<Debt, 'id' | 'paidAmount' | 'billingCycleIdentifier'>, idToUpdate?: string) => {
     if (idToUpdate) {
         setDebts(prev => prev.map(d => 
-            d.id === idToUpdate ? { ...d, ...debtData, id: idToUpdate } : d
+            d.id === idToUpdate ? { ...d, ...debtData, id: idToUpdate, paidAmount: d.paidAmount } : d
         ));
     } else {
         const newDebt: Debt = {
@@ -146,18 +323,12 @@ const App: React.FC = () => {
   }
 
   const payDebt = (debtId: string, amount: number) => {
-    let debtToPay: Debt | undefined;
-    setDebts(prev => prev.map(d => {
-        if (d.id === debtId) {
-            debtToPay = d;
-            return { ...d, paidAmount: d.paidAmount + amount };
-        }
-        return d;
-    }));
+    const debtToPay = debts.find(d => d.id === debtId);
+    if(!debtToPay) return;
 
-    if(debtToPay) {
-        const isCreditCardPayment = creditCards.some(c => c.id === debtToPay?.person);
-        saveTransaction({
+    const isCreditCardPayment = creditCards.some(c => c.id === debtToPay?.person);
+    saveTransaction(
+        {
             amount,
             description: `Pago de deuda: ${debtToPay.description}`,
             date: new Date().toISOString(),
@@ -165,8 +336,11 @@ const App: React.FC = () => {
             category: isCreditCardPayment ? 'Pago Tarjeta de Crédito' : 'Deudas',
             location: '',
             paymentMethod: PaymentMethod.BANK
-        })
-    }
+        },
+        undefined, // idToUpdate
+        debtId, // paidDebtId
+        undefined // loanDetails
+    );
   };
   
   const saveFixedExpense = (expenseData: Omit<FixedExpense, 'id' | 'lastPaidMonth'>, idToUpdate?: string) => {
@@ -244,6 +418,7 @@ const App: React.FC = () => {
     const newTransactions = data.transactions.map(t => ({
         ...t,
         id: crypto.randomUUID(),
+        status: 'active' as 'active',
         creditCardId: t.paymentMethod === PaymentMethod.CREDIT_CARD ? importedCardId : undefined
     }));
 
@@ -262,11 +437,11 @@ const App: React.FC = () => {
   const renderContent = () => {
     switch (activeTab) {
       case 'debts':
-        return <DebtManager debts={debts} onSaveDebt={saveDebt} onPayDebt={payDebt} onDeleteDebt={deleteDebt} />;
+        return <DebtManager debts={debts} transactions={transactions} creditCards={creditCards} onSaveDebt={saveDebt} onPayDebt={payDebt} onDeleteDebt={deleteDebt} />;
       case 'fixedExpenses':
         return <FixedExpenses expenses={fixedExpenses} categories={categories} onSaveExpense={saveFixedExpense} onPayExpense={payFixedExpense} onDeleteExpense={deleteFixedExpense} />;
       case 'categories':
-        return <CategoryManager categories={categories} onAddCategory={addCategory} />;
+        return <CategoryManager categories={categories} onSaveCategory={saveCategory} onDeleteCategory={deleteCategory} />;
       case 'settings':
         return <Settings creditCards={creditCards} onSave={saveCreditCard} onDelete={deleteCreditCard} onImportData={handleImportData}/>;
       case 'dashboard':
@@ -354,10 +529,13 @@ const App: React.FC = () => {
         <TransactionForm
           onSave={saveTransaction}
           onClose={handleCloseTransactionModal}
+          onVoid={voidTransaction}
           categories={categories}
           locations={locations}
           creditCards={creditCards.filter(c => c.status === CreditCardStatus.ACTIVE)}
           editingTransaction={editingTransaction}
+          debts={debts}
+          debtsOwedToMe={debtsOwedToMe}
         />
       </Modal>
     </div>

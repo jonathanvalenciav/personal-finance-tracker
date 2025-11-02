@@ -24,11 +24,13 @@ const StatCard: React.FC<{ title: string; amount: number; icon: string; color: s
 
 const BalanceSummary: React.FC<BalanceSummaryProps> = ({ transactions, debts, creditCards }) => {
   const { total, bank, cash, creditCardDebt } = useMemo(() => {
+    const activeTransactions = transactions.filter(t => t.status !== 'voided');
+    
     let bankBalance = 0;
     let cashBalance = 0;
 
-    transactions
-      .filter(t => t.paymentMethod !== PaymentMethod.CREDIT_CARD)
+    activeTransactions
+      .filter(t => t.paymentMethod !== PaymentMethod.CREDIT_CARD && !(t.type === TransactionType.INCOME && t.category === 'Pago Tarjeta de Crédito'))
       .forEach(t => {
         const amount = t.type === TransactionType.INCOME ? t.amount : -t.amount;
         if (t.paymentMethod === PaymentMethod.BANK) {
